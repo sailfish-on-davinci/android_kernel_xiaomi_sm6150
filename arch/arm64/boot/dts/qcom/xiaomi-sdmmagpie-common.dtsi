@@ -1,5 +1,4 @@
 /* Copyright (c) 2018, The Linux Foundation. All rights reserved.
- * Copyright (C) 2019 XiaoMi, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -18,20 +17,6 @@
 #include "sdmmagpie-thermal-overlay.dtsi"
 
 #include "sdmmagpie-sde-display.dtsi"
-
-/{
-	reserved-memory {
-		ramoops: ramoops@b0000000 {
-			compatible = "ramoops";
-			reg = <0 0xb0000000 0 0x00400000>;
-			record-size = <0x40000>; /*256x1024*/
-			console-size = <0x40000>;
-			ftrace-size = <0x40000>;
-			pmsg-size = <0x200000>;
-			ecc-size = <0x0>;
-		};
-	};
-};
 
 &soc {
 	mtp_batterydata: qcom,battery-data {
