@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2020 The Linux Foundation. All rights reserved.
  *
  * Permission to use, copy, modify, and/or distribute this software for
  * any purpose with or without fee is hereby granted, provided that the
@@ -45,6 +45,8 @@ static void target_if_cp_stats_free_stats_event(struct stats_event *ev)
 	ev->pdev_stats = NULL;
 	qdf_mem_free(ev->peer_stats);
 	ev->peer_stats = NULL;
+	qdf_mem_free(ev->peer_adv_stats);
+	ev->peer_adv_stats = NULL;
 	qdf_mem_free(ev->cca_stats);
 	ev->cca_stats = NULL;
 	qdf_mem_free(ev->vdev_summary_stats);
@@ -99,7 +101,9 @@ static QDF_STATUS target_if_cp_stats_extract_peer_stats(
 	uint32_t i;
 	QDF_STATUS status;
 	wmi_host_peer_stats peer_stats;
+	struct wmi_host_peer_adv_stats *peer_adv_stats;
 
+	/* Extract peer_stats */
 	ev->num_peer_stats = stats_param->num_peer_stats;
 	if (!ev->num_peer_stats)
 		return QDF_STATUS_SUCCESS;
@@ -114,17 +118,52 @@ static QDF_STATUS target_if_cp_stats_extract_peer_stats(
 	for (i = 0; i < ev->num_peer_stats; i++) {
 		status = wmi_extract_peer_stats(wmi_hdl, data, i, &peer_stats);
 		if (QDF_IS_STATUS_ERROR(status)) {
-			cp_stats_err("wmi_extract_pdev_stats failed");
+			cp_stats_err("wmi_extract_peer_stats failed");
 			continue;
 		}
 		WMI_MAC_ADDR_TO_CHAR_ARRAY(&peer_stats.peer_macaddr,
-						ev->peer_stats[i].peer_macaddr);
+					   ev->peer_stats[i].peer_macaddr);
 		ev->peer_stats[i].tx_rate = peer_stats.peer_tx_rate;
 		ev->peer_stats[i].rx_rate = peer_stats.peer_rx_rate;
 		ev->peer_stats[i].peer_rssi = peer_stats.peer_rssi +
 						TGT_NOISE_FLOOR_DBM;
 	}
 
+	/* Extract peer_adv_stats */
+	ev->num_peer_adv_stats = stats_param->num_peer_adv_stats;
+	if (!ev->num_peer_adv_stats)
+		return QDF_STATUS_SUCCESS;
+
+	ev->peer_adv_stats = qdf_mem_malloc(sizeof(*ev->peer_adv_stats) *
+					    ev->num_peer_adv_stats);
+	if (!ev->peer_adv_stats)
+		return QDF_STATUS_E_NOMEM;
+
+	peer_adv_stats = qdf_mem_malloc(sizeof(*peer_adv_stats) *
+					ev->num_peer_adv_stats);
+	if (!peer_adv_stats) {
+		qdf_mem_free(ev->peer_adv_stats);
+		return QDF_STATUS_E_NOMEM;
+	}
+
+	status = wmi_extract_peer_adv_stats(wmi_hdl, data, peer_adv_stats);
+	if (QDF_IS_STATUS_ERROR(status)) {
+		cp_stats_err("wmi_extract_peer_stats failed");
+		qdf_mem_free(peer_adv_stats);
+		qdf_mem_free(ev->peer_adv_stats);
+		ev->peer_adv_stats = NULL;
+		return QDF_STATUS_SUCCESS;
+	}
+
+	for (i = 0; i < ev->num_peer_adv_stats; i++) {
+		qdf_mem_copy(&ev->peer_adv_stats[i].peer_macaddr,
+			     &peer_adv_stats[i].peer_macaddr,
+			     WLAN_MACADDR_LEN);
+		ev->peer_adv_stats[i].fcs_count = peer_adv_stats[i].fcs_count;
+		ev->peer_adv_stats[i].rx_bytes = peer_adv_stats[i].rx_bytes;
+		ev->peer_adv_stats[i].rx_count = peer_adv_stats[i].rx_count;
+	}
+	qdf_mem_free(peer_adv_stats);
 	return QDF_STATUS_SUCCESS;
 }
 
@@ -137,17 +176,14 @@ static QDF_STATUS target_if_cp_stats_extract_cca_stats(
 	struct wmi_host_congestion_stats stats = {0};
 
 	status = wmi_extract_cca_stats(wmi_hdl, data, &stats);
-	if (QDF_IS_STATUS_ERROR(status)) {
-		cp_stats_debug("no congestion stats");
+	if (QDF_IS_STATUS_ERROR(status))
 		return QDF_STATUS_SUCCESS;
-	}
 
 	ev->cca_stats = qdf_mem_malloc(sizeof(*ev->cca_stats));
 	if (!ev->cca_stats) {
 		cp_stats_err("malloc failed");
 		return QDF_STATUS_E_NOMEM;
 	}
-
 
 	ev->cca_stats->vdev_id = stats.vdev_id;
 	ev->cca_stats->congestion = stats.congestion;
@@ -185,6 +221,10 @@ static QDF_STATUS target_if_cp_stats_extract_vdev_summary_stats(
 		bcn_snr = vdev_stats.vdev_snr.bcn_snr;
 		dat_snr = vdev_stats.vdev_snr.dat_snr;
 		ev->vdev_summary_stats[i].vdev_id = vdev_stats.vdev_id;
+
+		cp_stats_debug("vdev %d SNR bcn: %d data: %d",
+			       ev->vdev_summary_stats[i].vdev_id, bcn_snr,
+			       dat_snr);
 
 		for (j = 0; j < 4; j++) {
 			ev->vdev_summary_stats[i].stats.tx_frm_cnt[j]
@@ -256,8 +296,8 @@ static QDF_STATUS target_if_cp_stats_extract_vdev_chain_rssi_stats(
 		for (j = 0; j < MAX_NUM_CHAINS; j++) {
 			dat_snr = rssi_stats.rssi_avg_data[j];
 			bcn_snr = rssi_stats.rssi_avg_beacon[j];
-			cp_stats_err("Chain %d SNR bcn: %d data: %d", j,
-				     bcn_snr, dat_snr);
+			cp_stats_nofl_debug("Chain %d SNR bcn: %d data: %d", j,
+					    bcn_snr, dat_snr);
 			if (TGT_IS_VALID_SNR(bcn_snr))
 				ev->vdev_chain_rssi[i].chain_rssi[j] = bcn_snr;
 			else if (TGT_IS_VALID_SNR(dat_snr))
@@ -297,10 +337,19 @@ static QDF_STATUS target_if_cp_stats_extract_event(struct wmi_unified *wmi_hdl,
 		cp_stats_err("stats param extract failed: %d", status);
 		return status;
 	}
-	cp_stats_debug("num: pdev: %d, vdev: %d, peer: %d, rssi: %d",
-		       stats_param.num_pdev_stats, stats_param.num_vdev_stats,
-		       stats_param.num_peer_stats, stats_param.num_rssi_stats);
+	cp_stats_nofl_debug("num: pdev: %d, pdev_extd: %d, vdev: %d, peer: %d,"
+			    "rssi: %d, bcnflt: %d, channel: %d, bcn: %d, peer_extd2: %d, last_event: %x",
+			    stats_param.num_pdev_stats,
+			    stats_param.num_pdev_ext_stats,
+			    stats_param.num_vdev_stats,
+			    stats_param.num_peer_stats,
+			    stats_param.num_rssi_stats,
+			    stats_param.num_bcnflt_stats,
+			    stats_param.num_chan_stats,
+			    stats_param.num_bcn_stats,
+			    stats_param.num_peer_adv_stats, stats_param.last_event);
 
+	ev->last_event = stats_param.last_event;
 	status = target_if_cp_stats_extract_pdev_stats(wmi_hdl, &stats_param,
 						       ev, data);
 	if (QDF_IS_STATUS_ERROR(status))
@@ -527,6 +576,7 @@ static uint32_t get_stats_id(enum stats_req_type type)
 			WMI_REQUEST_PEER_STAT |
 			WMI_REQUEST_VDEV_STAT |
 			WMI_REQUEST_PDEV_STAT |
+			WMI_REQUEST_PEER_EXTD2_STAT |
 			WMI_REQUEST_RSSI_PER_CHAIN_STAT);
 	}
 

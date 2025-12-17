@@ -316,7 +316,6 @@ static void lim_update_ric_data(tpAniSirGlobal mac_ctx,
 			pe_err("RIC data not present");
 		}
 	} else {
-		pe_debug("Ric is not present");
 		session_entry->RICDataLen = 0;
 		session_entry->ricData = NULL;
 	}
@@ -364,7 +363,6 @@ static void lim_update_ese_tspec(tpAniSirGlobal mac_ctx,
 	} else {
 		session_entry->tspecLen = 0;
 		session_entry->tspecIes = NULL;
-		pe_debug("Tspec EID *NOT* present in assoc rsp");
 	}
 	return;
 }
@@ -478,6 +476,76 @@ static void lim_stop_reassoc_retry_timer(tpAniSirGlobal mac_ctx)
 	lim_deactivate_and_change_timer(mac_ctx, eLIM_REASSOC_FAIL_TIMER);
 }
 
+static void clean_up_ft_sha384(tpSirAssocRsp assoc_rsp, bool sha384_akm)
+{
+	if (sha384_akm) {
+		qdf_mem_free(assoc_rsp->sha384_ft_subelem.gtk);
+		qdf_mem_free(assoc_rsp->sha384_ft_subelem.igtk);
+	}
+}
+
+#ifdef WLAN_FEATURE_11W
+
+#define MAX_RETRY_TIMER 1500
+static QDF_STATUS
+lim_handle_pmfcomeback_timer(struct sPESession *session_entry,
+			     tpSirAssocRsp assoc_rsp)
+{
+	uint16_t timeout_value;
+
+	if (session_entry->pePersona != QDF_STA_MODE)
+		return QDF_STATUS_E_FAILURE;
+
+	if (session_entry->limRmfEnabled &&
+	    session_entry->pmf_retry_timer_info.retried &&
+	    assoc_rsp->statusCode == eSIR_MAC_TRY_AGAIN_LATER) {
+		pe_debug("Already retry in progress");
+		return QDF_STATUS_SUCCESS;
+	}
+
+	/*
+	 * Handle association Response for sta mode with RMF enabled and TRY
+	 * again later with timeout interval and Assoc comeback type
+	 */
+	if (!session_entry->limRmfEnabled || assoc_rsp->statusCode !=
+	    eSIR_MAC_TRY_AGAIN_LATER || !assoc_rsp->TimeoutInterval.present ||
+	    assoc_rsp->TimeoutInterval.timeoutType !=
+	    SIR_MAC_TI_TYPE_ASSOC_COMEBACK ||
+	    session_entry->pmf_retry_timer_info.retried)
+		return QDF_STATUS_E_FAILURE;
+
+	timeout_value = assoc_rsp->TimeoutInterval.timeoutValue;
+	if (timeout_value < 10) {
+		/*
+		 * if this value is less than 10 then our timer
+		 * will fail to start and due to this we will
+		 * never re-attempt. Better modify the timer
+		 * value here.
+		 */
+		timeout_value = 10;
+	}
+	timeout_value = QDF_MIN(MAX_RETRY_TIMER, timeout_value);
+	pe_debug("ASSOC res with eSIR_MAC_TRY_AGAIN_LATER recvd.Starting timer to wait timeout: %d",
+		 timeout_value);
+	if (QDF_STATUS_SUCCESS !=
+	    qdf_mc_timer_start(&session_entry->pmf_retry_timer,
+			       timeout_value)) {
+		pe_err("Failed to start comeback timer");
+		return QDF_STATUS_E_FAILURE;
+	}
+	session_entry->pmf_retry_timer_info.retried = true;
+
+	return QDF_STATUS_SUCCESS;
+}
+#else
+static QDF_STATUS
+lim_handle_pmfcomeback_timer(struct sPESession *session_entry,
+			     tpSirAssocRsp assoc_rsp)
+{
+	return QDF_STATUS_E_FAILURE;
+}
+#endif
+
 /**
  * lim_process_assoc_rsp_frame() - Processes assoc response
  * @mac_ctx: Pointer to Global MAC structure
@@ -510,35 +578,17 @@ lim_process_assoc_rsp_frame(tpAniSirGlobal mac_ctx,
 	struct csr_roam_session *roam_session;
 #endif
 	tSirMacEdcaParamRecord mu_edca_set[MAX_NUM_AC];
+	int8_t rssi;
+	QDF_STATUS status;
+	enum ani_akm_type auth_type;
+	bool sha384_akm;
 
-	/* Initialize status code to success. */
-	if (lim_is_roam_synch_in_progress(session_entry))
-		hdr = (tpSirMacMgmtHdr) mac_ctx->roam.pReassocResp;
-	else
-		hdr = WMA_GET_RX_MAC_HEADER(rx_pkt_info);
 #ifdef WLAN_FEATURE_ROAM_OFFLOAD
 	sme_sessionid = session_entry->smeSessionId;
 #endif
 	assoc_cnf.resultCode = eSIR_SME_SUCCESS;
 	/* Update PE session Id */
 	assoc_cnf.sessionId = session_entry->peSessionId;
-	if (hdr == NULL) {
-		pe_err("LFR3: Reassoc response packet header is NULL");
-		return;
-	}
-
-	pe_debug("received Re/Assoc: %d resp on sessionid: %d systemrole: %d"
-		" and mlmstate: %d RSSI: %d from "MAC_ADDRESS_STR, subtype,
-		session_entry->peSessionId, GET_LIM_SYSTEM_ROLE(session_entry),
-		session_entry->limMlmState,
-		(uint) abs((int8_t) WMA_GET_RX_RSSI_NORMALIZED(rx_pkt_info)),
-		MAC_ADDR_ARRAY(hdr->sa));
-
-	beacon = qdf_mem_malloc(sizeof(tSchBeaconStruct));
-	if (NULL == beacon) {
-		pe_err("Unable to allocate memory");
-		return;
-	}
 
 	if (LIM_IS_AP_ROLE(session_entry)) {
 		/*
@@ -547,16 +597,38 @@ lim_process_assoc_rsp_frame(tpAniSirGlobal mac_ctx,
 		 */
 		pe_err("Should not received Re/Assoc Response in role: %d",
 			GET_LIM_SYSTEM_ROLE(session_entry));
-		qdf_mem_free(beacon);
 		return;
 	}
+
 	if (lim_is_roam_synch_in_progress(session_entry)) {
 		hdr = (tpSirMacMgmtHdr) mac_ctx->roam.pReassocResp;
 		frame_len = mac_ctx->roam.reassocRespLen - SIR_MAC_HDR_LEN_3A;
+		rssi = 0;
 	} else {
 		hdr = WMA_GET_RX_MAC_HEADER(rx_pkt_info);
 		frame_len = WMA_GET_RX_PAYLOAD_LEN(rx_pkt_info);
+		rssi = (uint)abs((int8_t)WMA_GET_RX_RSSI_NORMALIZED(rx_pkt_info));
 	}
+
+	if (!hdr) {
+		pe_err("LFR3: Reassoc response packet header is NULL");
+		return;
+	}
+
+	pe_nofl_info("Assoc rsp RX: subtype %d vdev %d sys role %d lim state %d rssi %d from " QDF_MAC_ADDR_STR,
+		     subtype, session_entry->smeSessionId,
+		     GET_LIM_SYSTEM_ROLE(session_entry),
+		     session_entry->limMlmState, rssi,
+		     QDF_MAC_ADDR_ARRAY(hdr->sa));
+	QDF_TRACE_HEX_DUMP(QDF_MODULE_ID_PE, QDF_TRACE_LEVEL_DEBUG,
+			   (uint8_t *)hdr, frame_len + SIR_MAC_HDR_LEN_3A);
+
+	beacon = qdf_mem_malloc(sizeof(tSchBeaconStruct));
+	if (!beacon) {
+		pe_err("Unable to allocate memory");
+		return;
+	}
+
 	if (((subtype == LIM_ASSOC) &&
 		(session_entry->limMlmState != eLIM_MLM_WT_ASSOC_RSP_STATE)) ||
 		((subtype == LIM_REASSOC) &&
@@ -666,7 +738,13 @@ lim_process_assoc_rsp_frame(tpAniSirGlobal mac_ctx,
 #ifdef WLAN_FEATURE_ROAM_OFFLOAD
 	roam_session =
 		&mac_ctx->roam.roamSession[sme_sessionid];
-	if (assoc_rsp->FTInfo.R0KH_ID.present) {
+	if (assoc_rsp->sha384_ft_subelem.r0kh_id.present) {
+		roam_session->ftSmeContext.r0kh_id_len =
+			assoc_rsp->sha384_ft_subelem.r0kh_id.num_PMK_R0_ID;
+		qdf_mem_copy(roam_session->ftSmeContext.r0kh_id,
+			     assoc_rsp->sha384_ft_subelem.r0kh_id.PMK_R0_ID,
+			     roam_session->ftSmeContext.r0kh_id_len);
+	} else if (assoc_rsp->FTInfo.R0KH_ID.present) {
 		roam_session->ftSmeContext.r0kh_id_len =
 			assoc_rsp->FTInfo.R0KH_ID.num_PMK_R0_ID;
 		qdf_mem_copy(roam_session->ftSmeContext.r0kh_id,
@@ -675,13 +753,16 @@ lim_process_assoc_rsp_frame(tpAniSirGlobal mac_ctx,
 	} else {
 		roam_session->ftSmeContext.r0kh_id_len = 0;
 		qdf_mem_zero(roam_session->ftSmeContext.r0kh_id,
-			SIR_ROAM_R0KH_ID_MAX_LEN);
+			     SIR_ROAM_R0KH_ID_MAX_LEN);
 	}
 #endif
 
 #ifdef FEATURE_WLAN_ESE
 	lim_update_ese_tspec(mac_ctx, session_entry, assoc_rsp);
 #endif
+
+	auth_type = session_entry->connected_akm;
+	sha384_akm = lim_is_sha384_akm(auth_type);
 
 	if (assoc_rsp->capabilityInfo.ibss) {
 		/*
@@ -691,6 +772,7 @@ lim_process_assoc_rsp_frame(tpAniSirGlobal mac_ctx,
 		 * failure timeout.
 		 */
 		pe_err("received Re/AssocRsp frame with IBSS capability");
+		clean_up_ft_sha384(assoc_rsp, sha384_akm);
 		qdf_mem_free(assoc_rsp);
 		qdf_mem_free(beacon);
 		return;
@@ -698,6 +780,7 @@ lim_process_assoc_rsp_frame(tpAniSirGlobal mac_ctx,
 
 	if (cfg_get_capability_info(mac_ctx, &caps, session_entry)
 		!= QDF_STATUS_SUCCESS) {
+		clean_up_ft_sha384(assoc_rsp, sha384_akm);
 		qdf_mem_free(assoc_rsp);
 		qdf_mem_free(beacon);
 		pe_err("could not retrieve Capabilities");
@@ -705,25 +788,35 @@ lim_process_assoc_rsp_frame(tpAniSirGlobal mac_ctx,
 	}
 	lim_copy_u16((uint8_t *) &mac_capab, caps);
 
+	if (eSIR_MAC_XS_FRAME_LOSS_POOR_CHANNEL_RSSI_STATUS ==
+	   assoc_rsp->statusCode &&
+	    assoc_rsp->rssi_assoc_rej.present) {
+		struct sir_rssi_disallow_lst ap_info = {{0}};
+
+		ap_info.retry_delay = assoc_rsp->rssi_assoc_rej.retry_delay *
+							QDF_MC_TIMER_TO_MS_UNIT;
+		qdf_mem_copy(ap_info.bssid.bytes, hdr->sa, QDF_MAC_ADDR_SIZE);
+		ap_info.expected_rssi = assoc_rsp->rssi_assoc_rej.delta_rssi +
+					WMA_GET_RX_RSSI_NORMALIZED(rx_pkt_info);
+		lim_assoc_rej_add_to_rssi_based_reject_list(mac_ctx,
+							    &ap_info);
+	}
+
+	status = lim_handle_pmfcomeback_timer(session_entry, assoc_rsp);
+	/* return if retry again timer is started and ignore this assoc resp */
+	if (QDF_IS_STATUS_SUCCESS(status)) {
+		qdf_mem_free(beacon);
+		qdf_mem_free(assoc_rsp);
+		return;
+	}
+
 	/* Stop Association failure timer */
 	if (subtype == LIM_ASSOC)
 		lim_deactivate_and_change_timer(mac_ctx, eLIM_ASSOC_FAIL_TIMER);
 	else
 		lim_stop_reassoc_retry_timer(mac_ctx);
 
-	if (eSIR_MAC_XS_FRAME_LOSS_POOR_CHANNEL_RSSI_STATUS ==
-	   assoc_rsp->statusCode &&
-	    assoc_rsp->rssi_assoc_rej.present)
-		lim_assoc_rej_add_to_rssi_based_reject_list(mac_ctx,
-			&assoc_rsp->rssi_assoc_rej, hdr->sa,
-			WMA_GET_RX_RSSI_NORMALIZED(rx_pkt_info));
-
-	if (assoc_rsp->statusCode != eSIR_MAC_SUCCESS_STATUS
-#ifdef WLAN_FEATURE_11W
-		&& (!session_entry->limRmfEnabled ||
-			assoc_rsp->statusCode != eSIR_MAC_TRY_AGAIN_LATER)
-#endif
-	    ) {
+	if (assoc_rsp->statusCode != eSIR_MAC_SUCCESS_STATUS) {
 		/*
 		 *Re/Association response was received
 		 * either with failure code.
@@ -779,63 +872,6 @@ lim_process_assoc_rsp_frame(tpAniSirGlobal mac_ctx,
 	 * NOTE: for BTAMP case, it is being handled in
 	 * lim_process_mlm_assoc_req
 	 */
-#ifdef WLAN_FEATURE_11W
-	if (session_entry->limRmfEnabled &&
-		assoc_rsp->statusCode == eSIR_MAC_TRY_AGAIN_LATER) {
-		if (assoc_rsp->TimeoutInterval.present &&
-		(assoc_rsp->TimeoutInterval.timeoutType ==
-			SIR_MAC_TI_TYPE_ASSOC_COMEBACK)) {
-			uint16_t timeout_value =
-				assoc_rsp->TimeoutInterval.timeoutValue;
-			if (timeout_value < 10) {
-				/*
-				 * if this value is less than 10 then our timer
-				 * will fail to start and due to this we will
-				 * never re-attempt. Better modify the timer
-				 * value here.
-				 */
-				timeout_value = 10;
-			}
-			pe_debug("ASSOC res with eSIR_MAC_TRY_AGAIN_LATER recvd.Starting timer to wait timeout: %d",
-				timeout_value);
-			if (QDF_STATUS_SUCCESS !=
-				qdf_mc_timer_start(
-					&session_entry->pmfComebackTimer,
-					timeout_value)) {
-				pe_err("Failed to start comeback timer");
-
-				assoc_cnf.resultCode = eSIR_SME_ASSOC_REFUSED;
-				assoc_cnf.protStatusCode =
-					eSIR_MAC_UNSPEC_FAILURE_STATUS;
-
-				/*
-				 * Delete Pre-auth context for the
-				 * associated BSS
-				 */
-				if (lim_search_pre_auth_list(mac_ctx, hdr->sa))
-					lim_delete_pre_auth_node(mac_ctx,
-						hdr->sa);
-
-				goto assocReject;
-			}
-		} else {
-			pe_warn("ASSOC resp with try again event recvd, but try again time interval IE is wrong");
-
-			assoc_cnf.resultCode = eSIR_SME_ASSOC_REFUSED;
-			assoc_cnf.protStatusCode =
-				eSIR_MAC_UNSPEC_FAILURE_STATUS;
-
-			/* Delete Pre-auth context for the associated BSS */
-			if (lim_search_pre_auth_list(mac_ctx, hdr->sa))
-				lim_delete_pre_auth_node(mac_ctx, hdr->sa);
-
-			goto assocReject;
-		}
-		qdf_mem_free(beacon);
-		qdf_mem_free(assoc_rsp);
-		return;
-	}
-#endif
 	if (!lim_is_roam_synch_in_progress(session_entry)) {
 		if (lim_set_link_state
 			(mac_ctx, eSIR_LINK_POSTASSOC_STATE,
@@ -844,6 +880,7 @@ lim_process_assoc_rsp_frame(tpAniSirGlobal mac_ctx,
 			NULL) != QDF_STATUS_SUCCESS) {
 			pe_err("Set link state to POSTASSOC failed");
 			qdf_mem_free(beacon);
+			clean_up_ft_sha384(assoc_rsp, sha384_akm);
 			qdf_mem_free(assoc_rsp);
 			return;
 		}
@@ -976,6 +1013,7 @@ lim_process_assoc_rsp_frame(tpAniSirGlobal mac_ctx,
 		assoc_cnf.protStatusCode = eSIR_SME_SUCCESS;
 		lim_post_sme_message(mac_ctx, LIM_MLM_ASSOC_CNF,
 			(uint32_t *) &assoc_cnf);
+		clean_up_ft_sha384(assoc_rsp, sha384_akm);
 		qdf_mem_free(assoc_rsp);
 		qdf_mem_free(beacon);
 		return;
@@ -1041,6 +1079,7 @@ lim_process_assoc_rsp_frame(tpAniSirGlobal mac_ctx,
 			beacon,
 			&session_entry->pLimJoinReq->bssDescription, true,
 			 session_entry)) {
+		clean_up_ft_sha384(assoc_rsp, sha384_akm);
 		qdf_mem_free(assoc_rsp);
 		qdf_mem_free(beacon);
 		return;
@@ -1084,6 +1123,8 @@ assocReject:
 	}
 
 	qdf_mem_free(beacon);
+	qdf_mem_free(assoc_rsp->sha384_ft_subelem.gtk);
+	qdf_mem_free(assoc_rsp->sha384_ft_subelem.igtk);
 	qdf_mem_free(assoc_rsp);
 	return;
 }

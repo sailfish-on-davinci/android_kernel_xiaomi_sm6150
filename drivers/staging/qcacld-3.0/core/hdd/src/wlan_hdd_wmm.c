@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2020 The Linux Foundation. All rights reserved.
  *
  * Permission to use, copy, modify, and/or distribute this software for
  * any purpose with or without fee is hereby granted, provided that the
@@ -54,9 +54,8 @@
 #include <cds_sched.h>
 #include "sme_api.h"
 
-#define WLAN_HDD_MAX_DSCP 0x3f
-
 #define HDD_WMM_UP_TO_AC_MAP_SIZE 8
+#define DSCP(x)	x
 
 const uint8_t hdd_wmm_up_to_ac_map[] = {
 	SME_AC_BE,
@@ -1263,6 +1262,86 @@ static void hdd_wmm_do_implicit_qos(struct work_struct *work)
 	cds_ssr_unprotect(__func__);
 }
 
+QDF_STATUS hdd_send_dscp_up_map_to_fw(struct hdd_adapter *adapter)
+{
+	uint32_t *dscp_to_up_map = adapter->dscp_to_up_map;
+
+	/* Send DSCP to TID map table to FW */
+	return sme_send_dscp_up_map_to_fw(dscp_to_up_map);
+}
+
+/**
+ * hdd_fill_dscp_to_up_map() - Fill up dscp_to_up_map table with default values
+ * @dscp_to_up_map: Array of DSCP-to-UP map
+ *
+ * This function will fill up the DSCP-to-UP map table with default values.
+ *
+ * Return: QDF_STATUS enumeration
+ */
+static inline void hdd_fill_dscp_to_up_map(
+		enum sme_qos_wmmuptype *dscp_to_up_map)
+{
+	uint8_t dscp;
+
+	/*
+	 * DSCP to User Priority Lookup Table
+	 * By default use the 3 Precedence bits of DSCP as the User Priority
+	 *
+	 * In case of changing the default map values, need to take care of
+	 * hdd_custom_dscp_up_map as well.
+	 */
+	for (dscp = 0; dscp <= WLAN_MAX_DSCP; dscp++)
+		dscp_to_up_map[dscp] = dscp >> 3;
+
+	/* Special case for Expedited Forwarding (DSCP 46) in default mapping */
+	dscp_to_up_map[DSCP(46)] = SME_QOS_WMM_UP_VO;
+}
+
+#ifdef WLAN_CUSTOM_DSCP_UP_MAP
+/**
+ * hdd_custom_dscp_up_map() - Customize dscp_to_up_map based on RFC8325
+ * @dscp_to_up_map: Array of DSCP-to-UP map
+ *
+ * This function will customize the DSCP-to-UP map table based on RFC8325..
+ *
+ * Return: QDF_STATUS enumeration
+ */
+static inline QDF_STATUS hdd_custom_dscp_up_map(
+		enum sme_qos_wmmuptype *dscp_to_up_map)
+{
+	/*
+	 * Customizing few of DSCP to UP mapping based on RFC8325,
+	 * those are different from default hdd_fill_dscp_to_up_map values.
+	 * So, below changes are always relative to hdd_fill_dscp_to_up_map.
+	 */
+	dscp_to_up_map[DSCP(10)] = SME_QOS_WMM_UP_BE;
+	dscp_to_up_map[DSCP(12)] = SME_QOS_WMM_UP_BE;
+	dscp_to_up_map[DSCP(14)] = SME_QOS_WMM_UP_BE;
+	dscp_to_up_map[DSCP(16)] = SME_QOS_WMM_UP_BE;
+
+	dscp_to_up_map[DSCP(18)] = SME_QOS_WMM_UP_EE;
+	dscp_to_up_map[DSCP(20)] = SME_QOS_WMM_UP_EE;
+	dscp_to_up_map[DSCP(22)] = SME_QOS_WMM_UP_EE;
+
+	dscp_to_up_map[DSCP(24)] = SME_QOS_WMM_UP_CL;
+	dscp_to_up_map[DSCP(26)] = SME_QOS_WMM_UP_CL;
+	dscp_to_up_map[DSCP(28)] = SME_QOS_WMM_UP_CL;
+	dscp_to_up_map[DSCP(30)] = SME_QOS_WMM_UP_CL;
+
+	dscp_to_up_map[DSCP(44)] = SME_QOS_WMM_UP_VO;
+
+	dscp_to_up_map[DSCP(48)] = SME_QOS_WMM_UP_NC;
+
+	return QDF_STATUS_SUCCESS;
+}
+#else
+static inline QDF_STATUS hdd_custom_dscp_up_map(
+		enum sme_qos_wmmuptype *dscp_to_up_map)
+{
+	return QDF_STATUS_E_NOSUPPORT;
+}
+#endif /* WLAN_CUSTOM_DSCP_UP_MAP */
+
 /**
  * hdd_wmm_init() - initialize the WMM DSCP configuation
  * @adapter : [in]  pointer to Adapter context
@@ -1276,20 +1355,22 @@ static void hdd_wmm_do_implicit_qos(struct work_struct *work)
 QDF_STATUS hdd_wmm_init(struct hdd_adapter *adapter)
 {
 	enum sme_qos_wmmuptype *dscp_to_up_map = adapter->dscp_to_up_map;
-	uint8_t dscp;
+	struct wlan_objmgr_psoc *psoc = adapter->hdd_ctx->psoc;
+	QDF_STATUS status = QDF_STATUS_SUCCESS;
 
-	hdd_enter();
+	if (!psoc) {
+		hdd_err("Invalid psoc handle");
+		return QDF_STATUS_E_FAILURE;
+	}
 
-	/* DSCP to User Priority Lookup Table
-	 * By default use the 3 Precedence bits of DSCP as the User Priority
-	 */
-	for (dscp = 0; dscp <= WLAN_HDD_MAX_DSCP; dscp++)
-		dscp_to_up_map[dscp] = dscp >> 3;
+	hdd_fill_dscp_to_up_map(dscp_to_up_map);
 
-	/* Special case for Expedited Forwarding (DSCP 46) */
-	dscp_to_up_map[46] = SME_QOS_WMM_UP_VO;
+	if (hdd_custom_dscp_up_map(dscp_to_up_map) == QDF_STATUS_SUCCESS) {
+		/* Send DSCP to TID map table to FW */
+		status = hdd_send_dscp_up_map_to_fw(adapter);
+	}
 
-	return QDF_STATUS_SUCCESS;
+	return status;
 }
 
 /**
@@ -1533,7 +1614,7 @@ static uint16_t __hdd_get_queue_index(uint16_t up)
 	return hdd_linux_up_to_ac_map[up];
 }
 
-#ifdef QCA_LL_TX_FLOW_CONTROL_V2
+#if defined(QCA_LL_TX_FLOW_CONTROL_V2) || defined(QCA_LL_PDEV_TX_FLOW_CONTROL)
 /**
  * hdd_get_queue_index() - get queue index
  * @up: user priority
@@ -1556,48 +1637,6 @@ uint16_t hdd_get_queue_index(uint16_t up, bool is_eapol)
 }
 #endif
 
-
-/**
- * hdd_hostapd_select_queue() - Function which will classify the packet
- *       according to linux qdisc expectation.
- *
- * @dev: [in] pointer to net_device structure
- * @skb: [in] pointer to os packet
- *
- * Return: Qdisc queue index
- */
-uint16_t hdd_hostapd_select_queue(struct net_device *dev, struct sk_buff *skb
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 13, 0))
-				  , void *accel_priv
-#endif
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0))
-				  , select_queue_fallback_t fallback
-#endif
-
-)
-{
-	enum sme_qos_wmmuptype up = SME_QOS_WMM_UP_BE;
-	uint16_t queueIndex;
-	struct hdd_adapter *adapter = (struct hdd_adapter *) netdev_priv(dev);
-	struct hdd_context *hddctx = WLAN_HDD_GET_CTX(adapter);
-	bool is_eapol = false;
-	int status = 0;
-
-	status = wlan_hdd_validate_context(hddctx);
-
-	if (status != 0) {
-		skb->priority = SME_QOS_WMM_UP_BE;
-		return HDD_LINUX_AC_BE;
-	}
-
-	/* Get the user priority from IP header */
-	hdd_wmm_classify_pkt(adapter, skb, &up, &is_eapol);
-	skb->priority = up;
-	queueIndex = hdd_get_queue_index(skb->priority, is_eapol);
-
-	return queueIndex;
-}
-
 /**
  * hdd_wmm_select_queue() - Function which will classify the packet
  *       according to linux qdisc expectation.
@@ -1607,7 +1646,8 @@ uint16_t hdd_hostapd_select_queue(struct net_device *dev, struct sk_buff *skb
  *
  * Return: Qdisc queue index
  */
-uint16_t hdd_wmm_select_queue(struct net_device *dev, struct sk_buff *skb)
+static uint16_t hdd_wmm_select_queue(struct net_device *dev,
+				     struct sk_buff *skb)
 {
 	enum sme_qos_wmmuptype up = SME_QOS_WMM_UP_BE;
 	uint16_t queueIndex;
@@ -1648,6 +1688,33 @@ uint16_t hdd_wmm_select_queue(struct net_device *dev, struct sk_buff *skb)
 
 	return queueIndex;
 }
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 0))
+uint16_t hdd_select_queue(struct net_device *dev, struct sk_buff *skb,
+			  struct net_device *sb_dev,
+			  select_queue_fallback_t fallback)
+{
+	return hdd_wmm_select_queue(dev, skb);
+}
+#elif (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0))
+uint16_t hdd_select_queue(struct net_device *dev, struct sk_buff *skb,
+			  void *accel_priv, select_queue_fallback_t fallback)
+{
+	return hdd_wmm_select_queue(dev, skb);
+}
+#elif (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 13, 0))
+uint16_t hdd_select_queue(struct net_device *dev, struct sk_buff *skb,
+			  void *accel_priv)
+{
+	return hdd_wmm_select_queue(dev, skb);
+}
+#else
+uint16_t hdd_select_queue(struct net_device *dev, struct sk_buff *skb)
+{
+	return hdd_wmm_select_queue(dev, skb);
+}
+#endif
+
 
 /**
  * hdd_wmm_acquire_access_required() - Function which will determine
@@ -1942,7 +2009,6 @@ QDF_STATUS hdd_wmm_connect(struct hdd_adapter *adapter,
 	uint8_t acmMask;
 	mac_handle_t mac_handle;
 
-	hdd_enter();
 
 	if ((eCSR_BSS_TYPE_INFRASTRUCTURE == eBssType) &&
 	    roam_info && roam_info->u.pConnectedProfile) {
@@ -2002,8 +2068,6 @@ QDF_STATUS hdd_wmm_connect(struct hdd_adapter *adapter,
 		}
 
 	}
-
-	hdd_exit();
 
 	return QDF_STATUS_SUCCESS;
 }
@@ -2075,17 +2139,24 @@ bool hdd_wmm_is_active(struct hdd_adapter *adapter)
 	}
 }
 
-bool hdd_wmm_is_acm_allowed(struct wlan_objmgr_vdev **vdev)
+bool hdd_wmm_is_acm_allowed(uint8_t vdev_id)
 {
 	struct hdd_adapter *adapter;
 	struct hdd_wmm_ac_status *wmm_ac_status;
+	struct hdd_context *hdd_ctx;
 
-
-	adapter = container_of(vdev, struct hdd_adapter, vdev);
-	if (NULL == adapter) {
-		hdd_err("failed, hdd adapter is NULL");
+	hdd_ctx = cds_get_context(QDF_MODULE_ID_HDD);
+	if (!hdd_ctx) {
+		hdd_err("Unable to fetch the hdd context");
 		return false;
 	}
+
+	adapter = hdd_get_adapter_by_vdev(hdd_ctx, vdev_id);
+	if (hdd_validate_adapter(adapter)) {
+		hdd_err("Invalid adapter");
+		return false;
+	}
+
 	wmm_ac_status = adapter->hdd_wmm_status.wmmAcStatus;
 
 	if (hdd_wmm_is_active(adapter) &&

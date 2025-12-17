@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2018, 2020 The Linux Foundation. All rights reserved.
  *
  * Permission to use, copy, modify, and/or distribute this software for
  * any purpose with or without fee is hereby granted, provided that the
@@ -26,28 +26,6 @@
 #include "wlan_tdls_peer.h"
 #include "wlan_tdls_ct.h"
 #include "wlan_tdls_cmds_process.h"
-
-bool tdls_is_vdev_connected(struct wlan_objmgr_vdev *vdev)
-{
-	struct wlan_objmgr_peer *peer;
-	enum wlan_peer_state peer_state;
-
-	peer = wlan_vdev_get_bsspeer(vdev);
-
-	if (!peer) {
-		tdls_err("peer is null");
-		return false;
-	}
-
-	peer_state = wlan_peer_mlme_get_state(peer);
-
-	if (peer_state != WLAN_ASSOC_STATE) {
-		tdls_err("peer state: %d", peer_state);
-		return false;
-	}
-
-	return true;
-}
 
 bool tdls_is_vdev_authenticated(struct wlan_objmgr_vdev *vdev)
 {
@@ -258,9 +236,10 @@ void tdls_update_rx_pkt_cnt(struct wlan_objmgr_vdev *vdev,
 	uint8_t mac_cnt;
 	uint8_t valid_mac_entries;
 	struct tdls_conn_tracker_mac_table *mac_table;
+	struct wlan_objmgr_peer *bss_peer;
 
 	if (QDF_STATUS_SUCCESS != tdls_get_vdev_objects(vdev, &tdls_vdev_obj,
-						   &tdls_soc_obj))
+							&tdls_soc_obj))
 		return;
 
 	if (!tdls_soc_obj->enable_tdls_connection_tracker)
@@ -272,9 +251,19 @@ void tdls_update_rx_pkt_cnt(struct wlan_objmgr_vdev *vdev,
 	if (qdf_is_macaddr_group(dest_mac_addr))
 		return;
 
-	if (qdf_mem_cmp(vdev->vdev_mlme.macaddr, mac_addr,
-		QDF_MAC_ADDR_SIZE) == 0)
+	if (!qdf_mem_cmp(vdev->vdev_mlme.macaddr, mac_addr,
+			 QDF_MAC_ADDR_SIZE))
 		return;
+
+	bss_peer = wlan_objmgr_vdev_try_get_bsspeer(vdev, WLAN_TDLS_NB_ID);
+	if (bss_peer) {
+		if (!qdf_mem_cmp(bss_peer->macaddr, mac_addr,
+				 QDF_MAC_ADDR_SIZE)) {
+			wlan_objmgr_peer_release_ref(bss_peer, WLAN_TDLS_NB_ID);
+			return;
+		}
+		wlan_objmgr_peer_release_ref(bss_peer, WLAN_TDLS_NB_ID);
+	}
 
 	qdf_spin_lock_bh(&tdls_soc_obj->tdls_ct_spinlock);
 	valid_mac_entries = tdls_vdev_obj->valid_mac_entries;
@@ -311,9 +300,10 @@ void tdls_update_tx_pkt_cnt(struct wlan_objmgr_vdev *vdev,
 	uint8_t mac_cnt;
 	uint8_t valid_mac_entries;
 	struct tdls_conn_tracker_mac_table *mac_table;
+	struct wlan_objmgr_peer *bss_peer;
 
 	if (QDF_STATUS_SUCCESS != tdls_get_vdev_objects(vdev, &tdls_vdev_obj,
-						   &tdls_soc_obj))
+							&tdls_soc_obj))
 		return;
 
 	if (!tdls_soc_obj->enable_tdls_connection_tracker)
@@ -322,9 +312,19 @@ void tdls_update_tx_pkt_cnt(struct wlan_objmgr_vdev *vdev,
 	if (qdf_is_macaddr_group(mac_addr))
 		return;
 
-	if (qdf_mem_cmp(vdev->vdev_mlme.macaddr, mac_addr,
-		QDF_MAC_ADDR_SIZE) == 0)
+	if (!qdf_mem_cmp(vdev->vdev_mlme.macaddr, mac_addr,
+		QDF_MAC_ADDR_SIZE))
 		return;
+
+	bss_peer = wlan_objmgr_vdev_try_get_bsspeer(vdev, WLAN_TDLS_NB_ID);
+	if (bss_peer) {
+		if (!qdf_mem_cmp(bss_peer->macaddr, mac_addr,
+				 QDF_MAC_ADDR_SIZE)) {
+			wlan_objmgr_peer_release_ref(bss_peer, WLAN_TDLS_NB_ID);
+			return;
+		}
+		wlan_objmgr_peer_release_ref(bss_peer, WLAN_TDLS_NB_ID);
+	}
 
 	qdf_spin_lock_bh(&tdls_soc_obj->tdls_ct_spinlock);
 	mac_table = tdls_vdev_obj->ct_peer_table;
@@ -567,6 +567,7 @@ tdls_get_conn_info(struct tdls_soc_priv_obj *tdls_soc, uint8_t idx)
 	for (sta_idx = 0; sta_idx < WLAN_TDLS_STA_MAX_NUM; sta_idx++) {
 		if (idx == tdls_soc->tdls_conn_info[sta_idx].sta_id) {
 			tdls_debug("tdls peer with sta_idx %u exists", idx);
+			tdls_soc->tdls_conn_info[sta_idx].index = sta_idx;
 			return &tdls_soc->tdls_conn_info[sta_idx];
 		}
 	}
@@ -576,17 +577,12 @@ tdls_get_conn_info(struct tdls_soc_priv_obj *tdls_soc, uint8_t idx)
 }
 
 static void
-tdls_ct_process_idle_handler(
-			struct tdls_ct_idle_peer_data *tdls_idle_peer_data)
+tdls_ct_process_idle_handler(struct wlan_objmgr_vdev *vdev,
+			     struct tdls_conn_info *tdls_info)
 {
-	struct tdls_conn_info *tdls_info;
 	struct tdls_peer *curr_peer;
-	struct wlan_objmgr_vdev *vdev;
 	struct tdls_vdev_priv_obj *tdls_vdev_obj;
 	struct tdls_soc_priv_obj *tdls_soc_obj;
-
-	vdev = tdls_idle_peer_data->vdev;
-	tdls_info = tdls_idle_peer_data->tdls_info;
 
 	if (QDF_STATUS_SUCCESS != tdls_get_vdev_objects(vdev, &tdls_vdev_obj,
 						   &tdls_soc_obj))
@@ -637,25 +633,33 @@ tdls_ct_process_idle_handler(
 
 void tdls_ct_idle_handler(void *user_data)
 {
-	struct tdls_ct_idle_peer_data *tdls_idle_peer_data;
 	struct wlan_objmgr_vdev *vdev;
+	struct tdls_conn_info *tdls_info;
+	struct tdls_soc_priv_obj *tdls_soc_obj;
+	uint32_t idx;
 
-	tdls_idle_peer_data = (struct tdls_ct_idle_peer_data *) user_data;
-
-	if (NULL == tdls_idle_peer_data ||
-	    NULL == tdls_idle_peer_data->vdev ||
-	    NULL == tdls_idle_peer_data->tdls_info)
+	tdls_info = (struct tdls_conn_info *)user_data;
+	if (!tdls_info)
 		return;
 
-	vdev = tdls_idle_peer_data->vdev;
-	if (QDF_STATUS_SUCCESS != wlan_objmgr_vdev_try_get_ref(vdev,
-							WLAN_TDLS_NB_ID))
+	idx = tdls_info->index;
+	if (tdls_info->index == INVALID_TDLS_PEER_INDEX)
 		return;
 
-	tdls_ct_process_idle_handler(tdls_idle_peer_data);
+	tdls_soc_obj = qdf_container_of(tdls_info, struct tdls_soc_priv_obj,
+					tdls_conn_info[idx]);
+
+	vdev = tdls_get_vdev(tdls_soc_obj->soc, WLAN_TDLS_NB_ID);
+	if (!vdev) {
+		tdls_err("Unable to fetch the vdev");
+		return;
+	}
+
+	tdls_ct_process_idle_handler(vdev, tdls_info);
 	wlan_objmgr_vdev_release_ref(vdev,
 				     WLAN_TDLS_NB_ID);
 }
+
 
 /**
  * tdls_ct_process_idle_and_discovery() - process the traffic data
@@ -729,12 +733,10 @@ static void tdls_ct_process_connected_link(
 			uint8_t sta_id = (uint8_t)curr_peer->sta_id;
 			struct tdls_conn_info *tdls_info;
 			tdls_info = tdls_get_conn_info(tdls_soc, sta_id);
-			tdls_soc->tdls_idle_peer_data.tdls_info = tdls_info;
-			tdls_soc->tdls_idle_peer_data.vdev = tdls_vdev->vdev;
 			qdf_mc_timer_init(&curr_peer->peer_idle_timer,
 					  QDF_TIMER_TYPE_SW,
 					  tdls_ct_idle_handler,
-					  &tdls_soc->tdls_idle_peer_data);
+					  (void *)tdls_info);
 			curr_peer->is_peer_idle_timer_initialised = true;
 		}
 		if (QDF_TIMER_STATE_RUNNING !=
@@ -768,13 +770,13 @@ static void tdls_ct_process_cap_supported(struct tdls_peer *curr_peer,
 					struct tdls_vdev_priv_obj *tdls_vdev,
 					struct tdls_soc_priv_obj *tdls_soc_obj)
 {
-	tdls_debug("tx %d rx %d thr.pkt %d/idle %d rssi %d thr.trig %d/tear %d",
-		 curr_peer->tx_pkt, curr_peer->rx_pkt,
-		 tdls_vdev->threshold_config.tx_packet_n,
-		 tdls_vdev->threshold_config.idle_packet_n,
-		 curr_peer->rssi,
-		 tdls_vdev->threshold_config.rssi_trigger_threshold,
-		 tdls_vdev->threshold_config.rssi_teardown_threshold);
+
+	if (curr_peer->rx_pkt || curr_peer->tx_pkt)
+		tdls_debug(QDF_MAC_ADDR_STR "link_status %d tdls_support %d tx %d rx %d rssi %d",
+			   QDF_MAC_ADDR_ARRAY(curr_peer->peer_mac.bytes),
+			   curr_peer->link_status, curr_peer->tdls_support,
+			   curr_peer->tx_pkt, curr_peer->rx_pkt,
+			   curr_peer->rssi);
 
 	switch (curr_peer->link_status) {
 	case TDLS_LINK_IDLE:
@@ -814,9 +816,11 @@ static void tdls_ct_process_cap_unknown(struct tdls_peer *curr_peer,
 			(!curr_peer->is_forced_peer))
 			return;
 
-	tdls_debug("threshold tx pkt = %d peer tx_pkt = %d & rx_pkt = %d ",
-		tdls_vdev->threshold_config.tx_packet_n, curr_peer->tx_pkt,
-		curr_peer->rx_pkt);
+	if (curr_peer->rx_pkt || curr_peer->tx_pkt)
+		tdls_debug(QDF_MAC_ADDR_STR "link_status %d tdls_support %d tx %d rx %d",
+			   QDF_MAC_ADDR_ARRAY(curr_peer->peer_mac.bytes),
+			   curr_peer->link_status, curr_peer->tdls_support,
+			   curr_peer->tx_pkt, curr_peer->rx_pkt);
 
 	if (!TDLS_IS_LINK_CONNECTED(curr_peer) &&
 	    ((curr_peer->tx_pkt + curr_peer->rx_pkt) >=
@@ -857,10 +861,6 @@ static void tdls_ct_process_peers(struct tdls_peer *curr_peer,
 				  struct tdls_vdev_priv_obj *tdls_vdev_obj,
 				  struct tdls_soc_priv_obj *tdls_soc_obj)
 {
-	tdls_debug(QDF_MAC_ADDR_STR " link_status %d tdls_support %d",
-		 QDF_MAC_ADDR_ARRAY(curr_peer->peer_mac.bytes),
-		 curr_peer->link_status, curr_peer->tdls_support);
-
 	switch (curr_peer->tdls_support) {
 	case TDLS_CAP_SUPPORTED:
 		tdls_ct_process_cap_supported(curr_peer, tdls_vdev_obj,
@@ -979,14 +979,14 @@ int tdls_set_tdls_secoffchanneloffset(struct tdls_soc_priv_obj *tdls_soc,
 		return  -ENOTSUPP;
 	}
 
-	tdls_soc->tdls_channel_offset = 0;
+	tdls_soc->tdls_channel_offset = BW_INVALID;
 
 	switch (offchanoffset) {
 	case TDLS_SEC_OFFCHAN_OFFSET_0:
 		tdls_soc->tdls_channel_offset = BW20;
 		break;
 	case TDLS_SEC_OFFCHAN_OFFSET_40PLUS:
-		tdls_soc->tdls_channel_offset = BW40_LOW_PRIMARY;
+		tdls_soc->tdls_channel_offset = BW40_HIGH_PRIMARY;
 		break;
 	case TDLS_SEC_OFFCHAN_OFFSET_40MINUS:
 		tdls_soc->tdls_channel_offset = BW40_LOW_PRIMARY;
@@ -1032,7 +1032,7 @@ int tdls_set_tdls_offchannelmode(struct wlan_objmgr_vdev *vdev,
 		return -EINVAL;
 	}
 
-	if (!tdls_is_vdev_connected(vdev)) {
+	if (!wlan_vdev_is_up(vdev)) {
 		tdls_err("tdls off channel req in not associated state %d",
 			offchanmode);
 		return -EPERM;
@@ -1058,7 +1058,7 @@ int tdls_set_tdls_offchannelmode(struct wlan_objmgr_vdev *vdev,
 	switch (offchanmode) {
 	case ENABLE_CHANSWITCH:
 		if (tdls_soc->tdls_off_channel &&
-			tdls_soc->tdls_channel_offset) {
+			tdls_soc->tdls_channel_offset != BW_INVALID) {
 			chan_switch_params.tdls_off_ch =
 				tdls_soc->tdls_off_channel;
 			chan_switch_params.tdls_off_ch_bw_offset =
@@ -1067,6 +1067,23 @@ int tdls_set_tdls_offchannelmode(struct wlan_objmgr_vdev *vdev,
 			   tdls_find_opclass(tdls_soc->soc,
 				chan_switch_params.tdls_off_ch,
 				chan_switch_params.tdls_off_ch_bw_offset);
+			if (!chan_switch_params.oper_class) {
+				if (chan_switch_params.tdls_off_ch_bw_offset ==
+				    BW40_HIGH_PRIMARY)
+					chan_switch_params.oper_class =
+					tdls_find_opclass(tdls_soc->soc,
+						chan_switch_params.tdls_off_ch,
+						BW40_LOW_PRIMARY);
+				else if (chan_switch_params.
+					 tdls_off_ch_bw_offset ==
+					 BW40_LOW_PRIMARY)
+					chan_switch_params.oper_class =
+					tdls_find_opclass(tdls_soc->soc,
+						chan_switch_params.tdls_off_ch,
+						BW40_HIGH_PRIMARY);
+				tdls_debug("oper_class:%d",
+					    chan_switch_params.oper_class);
+			}
 		} else {
 			tdls_err("TDLS off-channel parameters are not set yet!!!");
 			return -EINVAL;
@@ -1151,18 +1168,17 @@ QDF_STATUS tdls_delete_all_tdls_peers(struct wlan_objmgr_vdev *vdev,
 	struct scheduler_msg msg = {0};
 	QDF_STATUS status;
 
+	peer = wlan_vdev_get_bsspeer(vdev);
+	if (!peer)
+		return QDF_STATUS_E_FAILURE;
+	 if (QDF_STATUS_SUCCESS !=
+	      wlan_objmgr_peer_try_get_ref(peer, WLAN_TDLS_SB_ID))
+		return QDF_STATUS_E_FAILURE;
 
 	del_msg = qdf_mem_malloc(sizeof(*del_msg));
-	if (NULL == del_msg) {
+	if (!del_msg) {
 		tdls_err("memory alloc failed");
-		return QDF_STATUS_E_FAILURE;
-	}
-	qdf_mem_zero(del_msg, sizeof(*del_msg));
-
-	peer = wlan_vdev_get_bsspeer(vdev);
-	if (QDF_STATUS_SUCCESS != wlan_objmgr_peer_try_get_ref(peer,
-							WLAN_TDLS_SB_ID)) {
-		qdf_mem_free(del_msg);
+		wlan_objmgr_peer_release_ref(peer, WLAN_TDLS_SB_ID);
 		return QDF_STATUS_E_FAILURE;
 	}
 
@@ -1212,7 +1228,7 @@ void tdls_disable_offchan_and_teardown_links(
 	}
 
 	if (TDLS_SUPPORT_SUSPENDED >= tdls_soc->tdls_current_mode) {
-		tdls_notice("TDLS mode %d is disabled OR not suspended now",
+		tdls_debug("TDLS mode %d is disabled OR not suspended now",
 			   tdls_soc->tdls_current_mode);
 		return;
 	}
@@ -1222,7 +1238,7 @@ void tdls_disable_offchan_and_teardown_links(
 		tdls_in_progress = true;
 
 	if (!(connected_tdls_peers || tdls_in_progress)) {
-		tdls_notice("No TDLS connected/progress peers to delete");
+		tdls_debug("No TDLS connected/progress peers to delete");
 		vdev_id = vdev->vdev_objmgr.vdev_id;
 		if (tdls_soc->set_state_info.set_state_cnt > 0) {
 			tdls_debug("Disable the tdls in FW as second interface is coming up");
@@ -1285,6 +1301,8 @@ void tdls_disable_offchan_and_teardown_links(
 					curr_peer->sta_id);
 		tdls_decrement_peer_count(tdls_soc);
 		tdls_soc->tdls_conn_info[staidx].sta_id = INVALID_TDLS_PEER_ID;
+		tdls_soc->tdls_conn_info[staidx].index =
+						INVALID_TDLS_PEER_INDEX;
 		tdls_soc->tdls_conn_info[staidx].session_id = 255;
 
 		qdf_mem_zero(&tdls_soc->tdls_conn_info[staidx].peer_mac,
@@ -1292,32 +1310,30 @@ void tdls_disable_offchan_and_teardown_links(
 	}
 }
 
-void tdls_teardown_connections(struct wlan_objmgr_vdev *vdev)
+void tdls_teardown_connections(struct wlan_objmgr_psoc *psoc)
 {
 	struct tdls_osif_indication indication;
 	struct tdls_soc_priv_obj *tdls_soc;
-	struct wlan_objmgr_vdev *tdls_vdev_obj;
+	struct wlan_objmgr_vdev *tdls_vdev;
 
-	if (!vdev) {
-		QDF_ASSERT(0);
-		return;
-	}
-
-	tdls_soc = wlan_vdev_get_tdls_soc_obj(vdev);
+	tdls_soc = wlan_psoc_get_tdls_soc_obj(psoc);
 	if (!tdls_soc)
 		return;
 
 	/* Get the tdls specific vdev and clear the links */
-	tdls_vdev_obj = tdls_get_vdev(tdls_soc->soc, WLAN_TDLS_SB_ID);
-	if (tdls_vdev_obj) {
-		tdls_disable_offchan_and_teardown_links(tdls_vdev_obj);
-		wlan_objmgr_vdev_release_ref(tdls_vdev_obj, WLAN_TDLS_SB_ID);
+	tdls_vdev = tdls_get_vdev(psoc, WLAN_TDLS_SB_ID);
+	if (!tdls_vdev) {
+		tdls_err("Unable to get the tdls vdev");
+		return;
 	}
 
-	indication.vdev = vdev;
+	tdls_disable_offchan_and_teardown_links(tdls_vdev);
+	indication.vdev = tdls_vdev;
 
 	if (tdls_soc->tdls_event_cb)
 		tdls_soc->tdls_event_cb(tdls_soc->tdls_evt_cb_data,
 				     TDLS_EVENT_TEARDOWN_LINKS_DONE,
 				     &indication);
+
+	wlan_objmgr_vdev_release_ref(tdls_vdev, WLAN_TDLS_SB_ID);
 }

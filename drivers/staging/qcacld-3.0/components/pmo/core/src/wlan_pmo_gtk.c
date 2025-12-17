@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019 The Linux Foundation. All rights reserved.
  *
  * Permission to use, copy, modify, and/or distribute this software for
  * any purpose with or without fee is hereby granted, provided that the
@@ -79,7 +79,7 @@ static QDF_STATUS pmo_core_do_enable_gtk_offload(
 		return QDF_STATUS_E_INVAL;
 	}
 
-	if (!pmo_core_is_vdev_connected(vdev))
+	if (!wlan_vdev_is_up(vdev))
 		return QDF_STATUS_E_INVAL;
 
 	vdev_id = pmo_vdev_get_id(vdev);
@@ -122,7 +122,7 @@ static QDF_STATUS pmo_core_is_gtk_enabled_in_fwr(
 		return QDF_STATUS_E_INVAL;
 	}
 
-	if (!pmo_core_is_vdev_connected(vdev))
+	if (!wlan_vdev_is_up(vdev))
 		return QDF_STATUS_E_INVAL;
 
 	status = pmo_get_vdev_bss_peer_mac_addr(vdev,
@@ -174,7 +174,6 @@ QDF_STATUS pmo_core_cache_gtk_offload_req(struct wlan_objmgr_vdev *vdev,
 	enum QDF_OPMODE opmode;
 	uint8_t vdev_id;
 
-	pmo_enter();
 	if (!gtk_req) {
 		pmo_err("gtk_req is NULL");
 		status = QDF_STATUS_E_INVAL;
@@ -205,7 +204,6 @@ QDF_STATUS pmo_core_cache_gtk_offload_req(struct wlan_objmgr_vdev *vdev,
 dec_ref:
 	pmo_vdev_put_ref(vdev);
 out:
-	pmo_exit();
 
 	return status;
 }
@@ -216,7 +214,6 @@ QDF_STATUS pmo_core_flush_gtk_offload_req(struct wlan_objmgr_vdev *vdev)
 	uint8_t vdev_id;
 	QDF_STATUS status;
 
-	pmo_enter();
 	if (!vdev) {
 		pmo_err("psoc is NULL");
 		status = QDF_STATUS_E_INVAL;
@@ -241,7 +238,6 @@ QDF_STATUS pmo_core_flush_gtk_offload_req(struct wlan_objmgr_vdev *vdev)
 dec_ref:
 	pmo_vdev_put_ref(vdev);
 out:
-	pmo_exit();
 
 	return status;
 }

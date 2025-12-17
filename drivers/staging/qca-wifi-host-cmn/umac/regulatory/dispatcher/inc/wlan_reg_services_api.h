@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2018, 2021 The Linux Foundation. All rights reserved.
  *
  * Permission to use, copy, modify, and/or distribute this software for
  * any purpose with or without fee is hereby granted, provided that the
@@ -85,6 +85,16 @@ QDF_STATUS wlan_reg_get_channel_list_with_power(struct wlan_objmgr_pdev *pdev,
  */
 QDF_STATUS wlan_reg_read_default_country(struct wlan_objmgr_psoc *psoc,
 				   uint8_t *country);
+
+/**
+ * wlan_reg_get_fcc_constraint() - Check FCC constraint on given frequency
+ * @pdev: physical dev to get
+ * @freq: frequency to be checked
+ *
+ * Return: If FCC constraint is on applied given frequency return true
+ *	   else return false.
+ */
+bool wlan_reg_get_fcc_constraint(struct wlan_objmgr_pdev *pdev, uint32_t freq);
 
 /**
  * wlan_reg_read_current_country() - Read the current country for the regdomain
@@ -245,6 +255,16 @@ uint16_t wlan_reg_dmn_get_opclass_from_channel(uint8_t *country,
 					       uint8_t offset);
 
 /**
+ * wlan_reg_dmn_print_channels_in_opclass() - Print channels in op-class
+ * @country: country alpha2
+ * @opclass: oplcass
+ *
+ * Return: void
+ */
+void wlan_reg_dmn_print_channels_in_opclass(uint8_t *country,
+					    uint8_t opclass);
+
+/**
  * wlan_reg_dmn_get_chanwidth_from_opclass() - get channel width from
  *                                             operating class
  * @country: country alpha2
@@ -346,6 +366,15 @@ void wlan_reg_update_nol_ch(struct wlan_objmgr_pdev *pdev,
 bool wlan_reg_is_dfs_ch(struct wlan_objmgr_pdev *pdev, uint32_t chan);
 
 /**
+ * wlan_reg_is_indoor_chan () - Checks the channel indoor
+ * @pdev: pdev ptr
+ * @chan: channel
+ *
+ * Return: true or false
+ */
+bool wlan_reg_is_indoor_chan(struct wlan_objmgr_pdev *pdev, uint32_t chan);
+
+/**
  * wlan_reg_is_dsrc_chan () - Checks if the channel is dsrc channel or not
  * @pdev: pdev ptr
  * @chan_num: channel
@@ -374,14 +403,26 @@ bool wlan_reg_is_etsi13_regdmn(struct wlan_objmgr_pdev *pdev);
 
 /**
  * wlan_reg_is_etsi13_srd_chan_allowed_master_mode() - Checks if regdmn is
- * ETSI13 and SRD channels are allowed in master mode or not.
+ * ETSI13 and SRD channels are allowed in master mode or not for particular
+ * vdev.
  *
  * @pdev: pdev ptr
+ * @vdev_opmode: vdev opmode
  *
  * Return: true or false
  */
-bool wlan_reg_is_etsi13_srd_chan_allowed_master_mode(struct wlan_objmgr_pdev
-						     *pdev);
+bool
+wlan_reg_is_etsi13_srd_chan_allowed_master_mode(struct wlan_objmgr_pdev *pdev,
+					        enum QDF_OPMODE vdev_opmode);
+
+/**
+ * reg_is_nan_allowed_on_indoor() - Check if nan is allowed on indoor channels
+ *
+ * @pdev: Pointer to pdev
+ *
+ * Return: true or false
+ */
+bool wlan_reg_is_nan_allowed_on_indoor(struct wlan_objmgr_pdev *pdev);
 
 /**
  * wlan_reg_is_passive_or_disable_ch () - Checks chan state for passive
@@ -427,6 +468,16 @@ uint32_t wlan_reg_chan_to_freq(struct wlan_objmgr_pdev *pdev,
  *
  * Return: true or false
  */
+
+/**
+ * wlan_reg_legacy_chan_to_freq () - convert chan to freq, for 2G and 5G
+ * @chan: channel number
+ *
+ * Return: frequency
+ */
+uint16_t wlan_reg_legacy_chan_to_freq(struct wlan_objmgr_pdev *pdev,
+				      uint8_t chan);
+
 bool wlan_reg_is_world(uint8_t *country);
 
 /**

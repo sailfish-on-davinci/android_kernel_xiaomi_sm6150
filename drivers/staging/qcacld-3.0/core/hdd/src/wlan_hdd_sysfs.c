@@ -72,8 +72,6 @@ static ssize_t __show_fw_version(struct kobject *kobj,
 				 struct kobj_attribute *attr,
 				 char *buf)
 {
-	uint32_t major_spid = 0, minor_spid = 0, siid = 0, crmid = 0;
-	uint32_t sub_id = 0;
 	struct hdd_context *hdd_ctx = cds_get_context(QDF_MODULE_ID_HDD);
 	int ret;
 
@@ -83,14 +81,14 @@ static ssize_t __show_fw_version(struct kobject *kobj,
 		return ret;
 	}
 
-	hdd_debug("Rcvd req for FW version");
-	hdd_get_fw_version(hdd_ctx, &major_spid, &minor_spid, &siid,
-			   &crmid);
-	sub_id = (hdd_ctx->target_fw_vers_ext & 0xf0000000) >> 28;
-
 	return scnprintf(buf, PAGE_SIZE,
-			 "FW:%d.%d.%d.%d.%d HW:%s Board version: %x Ref design id: %x Customer id: %x Project id: %x Board Data Rev: %x\n",
-			 major_spid, minor_spid, siid, crmid, sub_id,
+			 "FW:%d.%d.%d.%d.%d.%d HW:%s Board version: %x Ref design id: %x Customer id: %x Project id: %x Board Data Rev: %x\n",
+			 hdd_ctx->fw_version_info.major_spid,
+			 hdd_ctx->fw_version_info.minor_spid,
+			 hdd_ctx->fw_version_info.siid,
+			 hdd_ctx->fw_version_info.rel_id,
+			 hdd_ctx->fw_version_info.crmid,
+			 hdd_ctx->fw_version_info.sub_id,
 			 hdd_ctx->target_hw_name,
 			 hdd_ctx->hw_bd_info.bdf_version,
 			 hdd_ctx->hw_bd_info.ref_design_id,
@@ -112,6 +110,7 @@ static ssize_t show_fw_version(struct kobject *kobj,
 	return ret_val;
 };
 
+#ifdef WLAN_POWER_DEBUGFS
 struct power_stats_priv {
 	struct power_stats_response power_stats;
 };
@@ -257,6 +256,7 @@ static ssize_t show_device_power_stats(struct kobject *kobj,
 
 	return ret_val;
 }
+#endif
 
 #ifdef WLAN_FEATURE_BEACON_RECEPTION_STATS
 struct beacon_reception_stats_priv {
@@ -410,8 +410,10 @@ static struct kobj_attribute dr_ver_attribute =
 	__ATTR(driver_version, 0440, show_driver_version, NULL);
 static struct kobj_attribute fw_ver_attribute =
 	__ATTR(version, 0440, show_fw_version, NULL);
+#ifdef WLAN_POWER_DEBUGFS
 static struct kobj_attribute power_stats_attribute =
 	__ATTR(power_stats, 0444, show_device_power_stats, NULL);
+#endif
 
 void hdd_sysfs_create_version_interface(struct wlan_objmgr_psoc *psoc)
 {
@@ -474,6 +476,7 @@ void hdd_sysfs_destroy_version_interface(void)
 
 void hdd_sysfs_create_powerstats_interface(void)
 {
+#ifdef WLAN_POWER_DEBUGFS
 	int error;
 
 	if (!driver_kobject) {
@@ -484,15 +487,18 @@ void hdd_sysfs_create_powerstats_interface(void)
 	error = sysfs_create_file(driver_kobject, &power_stats_attribute.attr);
 	if (error)
 		hdd_err("could not create power_stats sysfs file");
+#endif
 }
 
 void hdd_sysfs_destroy_powerstats_interface(void)
 {
+#ifdef WLAN_POWER_DEBUGFS
 	if (!driver_kobject) {
 		hdd_err("could not get driver kobject!");
 		return;
 	}
 	sysfs_remove_file(driver_kobject, &power_stats_attribute.attr);
+#endif
 }
 
 void hdd_sysfs_create_driver_root_obj(void)
