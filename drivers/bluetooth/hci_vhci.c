@@ -128,6 +128,8 @@ static int __vhci_create_device(struct vhci_data *data, __u8 opcode)
 	hdev->flush = vhci_flush;
 	hdev->send  = vhci_send_frame;
 
+	set_bit(HCI_QUIRK_NO_SUSPEND_NOTIFIER, &hdev->quirks);
+
 	/* bit 6 is for external configuration */
 	if (opcode & 0x40)
 		set_bit(HCI_QUIRK_EXTERNAL_CONFIG, &hdev->quirks);
