@@ -1610,20 +1610,21 @@ int goodix_ts_suspend(struct goodix_ts_core *core_data)
 	/* disable irq */
 	goodix_ts_irq_enable(core_data, false);
 
-	/* let touch ic work in sleep mode */
-	if (ts_dev && ts_dev->hw_ops->suspend)
-		ts_dev->hw_ops->suspend(ts_dev);
-	atomic_set(&core_data->suspended, 1);
-	atomic_set(&core_data->suspend_stat, TP_SLEEP);
-
 #ifdef CONFIG_PINCTRL
 	if (core_data->pinctrl) {
 		r = pinctrl_select_state(core_data->pinctrl,
 				core_data->pin_sta_suspend);
 		if (r < 0)
-			ts_err("Failed to select active pinstate, r:%d", r);
+			ts_debug("Failed to select suspend pinstate, r:%d, continuing...", r);
 	}
 #endif
+
+
+	/* let touch ic work in sleep mode */
+	if (ts_dev && ts_dev->hw_ops->suspend)
+		ts_dev->hw_ops->suspend(ts_dev);
+	atomic_set(&core_data->suspended, 1);
+	atomic_set(&core_data->suspend_stat, TP_SLEEP);
 
 	/* inform exteranl modules */
 	mutex_lock(&goodix_modules.mutex);
