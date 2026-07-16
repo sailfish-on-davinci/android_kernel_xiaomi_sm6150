@@ -5612,8 +5612,7 @@ static void smblib_handle_apsd_done(struct smb_charger *chg, bool rising)
 	case SDP_CHARGER_BIT:
 	case CDP_CHARGER_BIT:
 	case FLOAT_CHARGER_BIT:
-		if (chg->use_extcon)
-			smblib_notify_device_mode(chg, true);
+		smblib_notify_device_mode(chg, true);
 		break;
 	case OCP_CHARGER_BIT:
 	case DCP_CHARGER_BIT:
@@ -5801,10 +5800,8 @@ static void typec_sink_insertion(struct smb_charger *chg)
 	if (rc < 0)
 		dev_err(chg->dev, "Error in setting freq_boost rc=%d\n", rc);
 
-	if (chg->use_extcon) {
-		smblib_notify_usb_host(chg, true);
-		chg->otg_present = true;
-	}
+	smblib_notify_usb_host(chg, true);
+	chg->otg_present = true;
 
 	if (!chg->pr_swap_in_progress)
 		chg->ok_to_pd = (!(*chg->pd_disabled) || chg->early_usb_attach)
@@ -5853,11 +5850,9 @@ static void typec_sink_removal(struct smb_charger *chg)
 	if (rc < 0)
 		dev_err(chg->dev, "Error in setting freq_removal rc=%d\n", rc);
 
-	if (chg->use_extcon) {
-		if (chg->otg_present)
-			smblib_notify_usb_host(chg, false);
-		chg->otg_present = false;
-	}
+	if (chg->otg_present)
+		smblib_notify_usb_host(chg, false);
+	chg->otg_present = false;
 }
 
 static void typec_src_removal(struct smb_charger *chg)
@@ -5981,8 +5976,7 @@ static void typec_src_removal(struct smb_charger *chg)
 		chg->qc2_unsupported_voltage = QC2_COMPLIANT;
 	}
 
-	if (chg->use_extcon)
-		smblib_notify_device_mode(chg, false);
+	smblib_notify_device_mode(chg, false);
 
 
 	chg->typec_legacy = false;
