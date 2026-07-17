@@ -645,6 +645,34 @@ static DEVICE_ATTR(read_cfg, S_IRUGO, goodix_ts_read_cfg_show, NULL);
 static DEVICE_ATTR(irq_info, S_IRUGO | S_IWUSR | S_IWGRP,
 		goodix_ts_irq_info_show, goodix_ts_irq_info_store);
 
+static ssize_t double_tap_wake_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct goodix_ts_core *core_data = dev_get_drvdata(dev);
+
+	return snprintf(buf, PAGE_SIZE, "%d\n", core_data->double_wakeup ? 1 : 0);
+}
+
+static ssize_t double_tap_wake_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct goodix_ts_core *core_data = dev_get_drvdata(dev);
+	unsigned long val;
+
+	if (kstrtoul(buf, 0, &val))
+		return -EINVAL;
+
+	if (!core_data)
+		return -ENODEV;
+
+	core_data->double_wakeup = val ? 1 : 0;
+	core_data->gesture_enabled = core_data->double_wakeup | core_data->fod_status;
+	goodix_check_gesture_stat(!!core_data->double_wakeup);
+
+	return count;
+}
+static DEVICE_ATTR_RW(double_tap_wake);
+
 static struct attribute *sysfs_attrs[] = {
 	&dev_attr_extmod_info.attr,
 	&dev_attr_driver_info.attr,
@@ -654,6 +682,7 @@ static struct attribute *sysfs_attrs[] = {
 	&dev_attr_send_cfg.attr,
 	&dev_attr_read_cfg.attr,
 	&dev_attr_irq_info.attr,
+	&dev_attr_double_tap_wake.attr,
 	NULL,
 };
 
